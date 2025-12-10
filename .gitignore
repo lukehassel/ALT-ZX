@@ -1,0 +1,42 @@
+# Virtual Environment
+venv/
+venv312/
+env/
+ENV/
+.venv
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model checkpoints
+checkpoints/
+*.pt
+*.pth
+*.pkl
+
+# Data
+data/
+*.qasm
+
+# Logs
+*.log
+logs/
+

@@ -1,0 +1,18 @@
+# Core Machine Learning & Compute
+torch>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Graph Neural Networks
+# Note: torch-scatter and torch-sparse often require specific binary installation 
+# depending on CUDA version, but pip handles the base dependency.
+torch-geometric>=2.3.0
+
+# Quantum & ZX-Calculus
+pyzx>=0.7.0      # Critical for converting Circuits <-> Graphs and checking gflow
+qiskit>=0.44.0   # For loading standard QASM benchmarks (e.g. MQTBench)
+
+# Utilities
+networkx>=3.0    # Graph data structures
+tqdm>=4.65.0     # Progress bars
+matplotlib>=3.7.0 # Visualization
