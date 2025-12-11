@@ -48,11 +48,14 @@ class ZXVGAE(VGAE):
 
     def loss(self, x, edge_index, pos_edge_label_index, neg_edge_label_index=None):
         z, _, node_type_logits, phase_pred = self.forward(x, edge_index)
-        loss_structure = self.recon_loss(z, pos_edge_label_index, neg_edge_label_index)
-        loss_kl = (1 / x.size(0)) * self.kl_loss()
-        target_types = x[:, :5].argmax(dim=1)
-        loss_types = F.cross_entropy(node_type_logits, target_types)
-        target_phases = x[:, 5:6]
-        loss_phases = F.mse_loss(phase_pred, target_phases)
-        total_loss = loss_structure + loss_kl + loss_types + loss_phases
+        # loss_structure = self.recon_loss(z, pos_edge_label_index, neg_edge_label_index)
+        # loss_kl = (1 / x.size(0)) * self.kl_loss()
+        # target_types = x[:, :5].argmax(dim=1)
+        # loss_types = F.cross_entropy(node_type_logits, target_types)
+        # target_phases = x[:, 5:6]
+        # loss_phases = F.mse_loss(phase_pred, target_phases)
+        # total_loss = loss_structure + loss_kl + loss_types + loss_phases
+        
+        # TODO: Add loss for semantic classification
+        
         return total_loss
