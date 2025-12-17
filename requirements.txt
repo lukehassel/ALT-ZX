@@ -7,12 +7,16 @@ scipy>=1.10.0
 # Note: torch-scatter and torch-sparse often require specific binary installation 
 # depending on CUDA version, but pip handles the base dependency.
 torch-geometric>=2.3.0
+dgl==2.2.1  # CPU wheel available on PyPI; GPU users may prefer dgl-cu11
 
 # Quantum & ZX-Calculus
 pyzx>=0.7.0      # Critical for converting Circuits <-> Graphs and checking gflow
-qiskit>=0.44.0   # For loading standard QASM benchmarks (e.g. MQTBench)
+qiskit>=1.0.0,<2.0.0      # For loading standard QASM benchmarks (e.g. MQTBench)
+qiskit-aer                # Provides backend simulation
 
 # Utilities
 networkx>=3.0    # Graph data structures
 tqdm>=4.65.0     # Progress bars
 matplotlib>=3.7.0 # Visualization
+mqt.bench
+qiskit-ibm-runtime>=0.20.0  # Use V2 fake backends (FakeMontrealV2, etc.)

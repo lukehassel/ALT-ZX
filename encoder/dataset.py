@@ -1,38 +1,44 @@
 import os
 import gc
+import sys
 import torch
 import torch.nn as nn
-import dgl
 import numpy as np
 import random
 import pyzx as zx
 from torch.utils.data import Dataset
+from torch_geometric.data import Batch
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from qiskit import QuantumCircuit, transpile, qasm2
+from qiskit import QuantumCircuit, transpile
 from qiskit.circuit import Gate
 from qiskit.converters import circuit_to_dag
 from mqt.yaqs.core.libraries.gate_library import GateLibrary
 from mqt.yaqs.digital.equivalence_checker import MPO, iterate
-from src.model.diffusion import DiscreteDiffusion
-from mpo.circuit_utils import get_universal_gate_set
-from mpo.circuit_utils import create_random_circuit_with_universal_gates
-from mpo.fidelity import get_fidelity
+
+# Ensure project root on sys.path for local imports (src/, zx_loader, etc.)
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from src.model.diffusion import DiscreteDiffusion  # noqa: E402
+from circuit_utils import get_universal_gate_set  # noqa: E402
+from circuit_utils import create_random_circuit_with_universal_gates  # noqa: E402
+from mpo.fidelity import get_fidelity  # noqa: E402
+from zx_loader import circuit_to_pyg  # noqa: E402
 
 GATE_TO_IDX = {g: i for i, g in enumerate(get_universal_gate_set()['all'])}
 IDX_TO_GATE = {i: g for g, i in GATE_TO_IDX.items()}
 NUM_GATE_TYPES = len(get_universal_gate_set()['all'])
 
+# Basic gates that PyZX can parse
+PYZX_BASIS_GATES = ['cx', 'cz', 'h', 'x', 'y', 'z', 's', 't', 'sdg', 'tdg', 'rx', 'ry', 'rz', 'u1', 'u2', 'u3', 'ccx', 'swap']
+
 
 class EncoderDataset(Dataset):
-    def __init__(self, file_path=None, size=100, min_qubits=3, max_qubits=5, 
-                 min_depth=5, max_depth=15, verbose=False,
+    def __init__(self, file_path=None, size=100, min_qubits=3, max_qubits=10,
+                 min_depth=5, max_depth=50, verbose=False,
                  chunk_size=1000):
-        """
-        Args:
-            file_path (str): Path to save/load the dataset (e.g. 'data/train_v1.pt')
-            size (int): Number of pairs to generate if file doesn't exist.
-        """
         self.size = size
         self.verbose = verbose
         self.file_path = file_path
@@ -103,7 +109,7 @@ class EncoderDataset(Dataset):
         gc.collect()
         self._chunk_idx += 1
             
-    def _apply_noise_to_circuit(self, qc, t_val=None, debug=False):
+    def _apply_noise_to_circuit(self, qc, t_val, debug=False):
         dag = circuit_to_dag(qc)
         ops = list(dag.topological_op_nodes())
         if not ops: return qc
@@ -112,8 +118,6 @@ class EncoderDataset(Dataset):
         gate_indices = [GATE_TO_IDX.get(op.name, 0) for op in ops]
         x_0 = torch.tensor(gate_indices).long().unsqueeze(1)
         
-
-        t_val = random.randint(10, 30)
         t = torch.tensor([t_val])
         intensity = t.item() / self.diffusion.T
         MAX_DRIFT = 0.1
@@ -197,14 +201,37 @@ class EncoderDataset(Dataset):
             num_qubits = random.randint(min_q, max_q)
             depth = random.randint(min_d, max_d)
             circuit = create_random_circuit_with_universal_gates(num_qubits, depth)
-            noisy_circuit = self._apply_noise_to_circuit(circuit)
-            fid_res = get_fidelity(circuit, noisy_circuit)
-            fidelity_value = fid_res['fidelity']
-            sample = {
-                "circuit_1": qasm2.dumps(circuit),
-                "circuit_2": qasm2.dumps(noisy_circuit),
-                "fidelity": fidelity_value,
-            }
+
+            # Apply noise iteratively until fidelity drops below 0.1 (or give up after max steps)
+            noisy_circuit = circuit
+            fidelity_value = 1.0
+            max_noise_steps = 50
+            t_val = 10
+            noise_steps = 0
+
+            while fidelity_value >= 0.1 and noise_steps < max_noise_steps:
+                noisy_circuit = self._apply_noise_to_circuit(noisy_circuit, t_val=t_val)
+                fid_res = get_fidelity(circuit, noisy_circuit)
+                fidelity_value = fid_res["fidelity"]
+                noise_steps += 1
+                t_val += 10
+
+            # If we failed to lower fidelity sufficiently, skip this attempt
+            if fidelity_value >= 0.1:
+                del circuit, noisy_circuit
+                continue
+
+            # Transpile to basic gates that PyZX can parse
+            circuit_transpiled = transpile(circuit, basis_gates=PYZX_BASIS_GATES, optimization_level=0)
+            noisy_circuit_transpiled = transpile(noisy_circuit, basis_gates=PYZX_BASIS_GATES, optimization_level=0)
+
+            # Convert to PyG graphs
+            data1 = circuit_to_pyg(circuit_transpiled)
+            data2 = circuit_to_pyg(noisy_circuit_transpiled)
+            data1.num_qubits = circuit_transpiled.num_qubits
+            data2.num_qubits = noisy_circuit_transpiled.num_qubits
+            label = torch.tensor(fidelity_value, dtype=torch.float32)
+            sample = (data1, data2, label)
 
             if self.stream_to_dir:
                 self._current_chunk.append(sample)
@@ -213,7 +240,7 @@ class EncoderDataset(Dataset):
             else:
                 self.data_pairs.append(sample)
 
-            del circuit, noisy_circuit, fid_res, sample
+            del circuit, noisy_circuit, circuit_transpiled, noisy_circuit_transpiled, fid_res, sample
             gc.collect()
 
             num_generated += 1
@@ -262,34 +289,21 @@ def collate_dict_batch(batch):
 
 def collate_quantum_graphs(batch):
     """
-    Collate function for EncoderDataset that converts QASM strings to DGL graphs.
-    Returns ((g1_batch, t1_batch, l1_batch), (g2_batch, t2_batch, l2_batch))
+    Collate function for EncoderDataset that batches PyG Data tuples.
+    Returns (Batch1, Batch2, labels)
     """
-    from encoder.utils import qasm_to_dgl
-    
-    graphs_1, types_1, locs_1 = [], [], []
-    graphs_2, types_2, locs_2 = [], [], []
-    
-    for item in batch:
-        g1, t1, l1 = qasm_to_dgl(item['circuit_1'])
-        graphs_1.append(g1)
-        types_1.append(t1)
-        locs_1.append(l1)
-        
-        g2, t2, l2 = qasm_to_dgl(item['circuit_2'])
-        graphs_2.append(g2)
-        types_2.append(t2)
-        locs_2.append(l2)
-    
-    batched_g1 = dgl.batch(graphs_1)
-    batched_g2 = dgl.batch(graphs_2)
-    
-    batched_t1 = torch.cat(types_1)
-    batched_l1 = torch.cat(locs_1)
-    batched_t2 = torch.cat(types_2)
-    batched_l2 = torch.cat(locs_2)
-    
-    return (batched_g1, batched_t1, batched_l1), (batched_g2, batched_t2, batched_l2)
+    data1_list, data2_list, labels = [], [], []
+
+    for data1, data2, label in batch:
+        data1_list.append(data1)
+        data2_list.append(data2)
+        labels.append(label)
+
+    batch1 = Batch.from_data_list(data1_list)
+    batch2 = Batch.from_data_list(data2_list)
+    labels = torch.stack(labels)
+
+    return batch1, batch2, labels
 
 
 if __name__ == "__main__":
@@ -297,7 +311,7 @@ if __name__ == "__main__":
 
     dataset = EncoderDataset(
         file_path=DATA_DIR,
-        size=9999999,
+        size=50000,
         verbose=True,
         chunk_size=1000,
     )
