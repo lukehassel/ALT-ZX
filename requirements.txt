@@ -7,7 +7,7 @@ scipy>=1.10.0
 # Note: torch-scatter and torch-sparse often require specific binary installation 
 # depending on CUDA version, but pip handles the base dependency.
 torch-geometric>=2.3.0
-dgl==2.2.1  # CPU wheel available on PyPI; GPU users may prefer dgl-cu11
+dgl>=2.1.0  # CPU wheel available on PyPI; GPU users may prefer dgl-cu11 (updated for Python 3.12 compatibility)
 
 # Quantum & ZX-Calculus
 pyzx>=0.7.0      # Critical for converting Circuits <-> Graphs and checking gflow

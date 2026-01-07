@@ -1,93 +1,88 @@
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, global_mean_pool
+from torch_geometric.nn import GCNConv, DenseGCNConv, global_mean_pool
+from torch_geometric.data import Batch, Data
+
+
+class PairData(Data):
+    def __inc__(self, key, value, *args, **kwargs):
+        if key == 'edge_index':
+            return self.x.size(0)
+        if key == 'edge_index2':
+            return self.x2.size(0)
+        return super().__inc__(key, value, *args, **kwargs)
+
 
 class ZXNet(nn.Module):
     def __init__(self, num_node_features):
         super(ZXNet, self).__init__()
-        
-        # Shared GCN Encoder
         self.conv1 = GCNConv(num_node_features, 64)
         self.conv2 = GCNConv(64, 64)
         
-        # Classification Head (concatenating two 64-dim vectors -> 128 input)
-        self.fc1 = nn.Linear(128, 64)
-        self.fc2 = nn.Linear(64, 2) # Output: Logits for [Not Equivalent, Equivalent]
-
-    def forward_one_graph(self, data):
-        x, edge_index = data.x, data.edge_index
+        self.conv1_dense = DenseGCNConv(num_node_features, 64)
+        self.conv2_dense = DenseGCNConv(64, 64)
         
-        # Layer 1
+        # 3 vectors concatenated: u, v, |u-v| -> 64*3 = 192
+        self.fc1 = nn.Linear(192, 64)
+        self.fc2 = nn.Linear(64, 1)
+        
+        self._dense_weights_synced = False
+
+    def _sync_dense_weights(self):
+        if not self._dense_weights_synced:
+            self.conv1_dense.lin.weight.data = self.conv1.lin.weight.data.clone()
+            self.conv1_dense.bias.data = self.conv1.bias.data.clone()
+            self.conv2_dense.lin.weight.data = self.conv2.lin.weight.data.clone()
+            self.conv2_dense.bias.data = self.conv2.bias.data.clone()
+            self._dense_weights_synced = True
+
+    def forward_one_graph(self, x, edge_index, batch):
         x = self.conv1(x, edge_index)
         x = F.relu(x)
-        
-        # Layer 2
         x = self.conv2(x, edge_index)
         x = F.relu(x)
-        
-        # Global Mean Pooling 
-        x = global_mean_pool(x, data.batch)
+        x = global_mean_pool(x, batch)
         return x
+    
+    def forward_one_graph_dense(self, x, adj, mask=None):
+        self._sync_dense_weights()
+        
+        if x.dim() == 2:
+            x = x.unsqueeze(0)
+            adj = adj.unsqueeze(0)
+            if mask is not None:
+                mask = mask.unsqueeze(0)
+        
+        h = self.conv1_dense(x, adj, mask)
+        h = F.relu(h)
+        h = self.conv2_dense(h, adj, mask)
+        h = F.relu(h)
+        
+        if mask is not None:
+            mask_expanded = mask.unsqueeze(-1).float()
+            h = (h * mask_expanded).sum(dim=1) / mask_expanded.sum(dim=1).clamp(min=1)
+        else:
+            h = h.mean(dim=1)
+        
+        return h
 
-    def forward(self, data1, data2):
-        # Siamese Architecture: Process both graphs with same weights
-        emb1 = self.forward_one_graph(data1)
-        emb2 = self.forward_one_graph(data2)
+    def forward(self, data):
+        if isinstance(data, (tuple, list)) and len(data) >= 2:
+            batch_g1, batch_g2 = data[0], data[1]
+        else:
+            raise ValueError(f"Expected tuple/list of 2 Batch objects, got {type(data)}")
+
+        emb1 = self.forward_one_graph(batch_g1.x, batch_g1.edge_index, batch_g1.batch)
+        emb2 = self.forward_one_graph(batch_g2.x, batch_g2.edge_index, batch_g2.batch)
         
-        # Combine representations (Concatenation)
-        combined = torch.cat([emb1, emb2], dim=1)
+        combined = torch.cat([emb1, emb2, torch.abs(emb1 - emb2)], dim=1)
         
-        # Classifier
         out = self.fc1(combined)
         out = F.relu(out)
         out = self.fc2(out)
-        
-        return out
-    
-    def compute_jaccard(self, data1, data2):
-        """
-        Computes Jaccard index of edge sets for a batch. 
-        Note: Simplified for single-pair batches for clarity.
-        """
-        # Convert edge_index to set of tuples
-        e1 = set(map(tuple, data1.edge_index.t().tolist()))
-        e2 = set(map(tuple, data2.edge_index.t().tolist()))
-        
-        intersection = len(e1.intersection(e2))
-        union = len(e1.union(e2))
-        
-        return intersection / union if union > 0 else 0.0
-    
-    def zxnet_loss(self, logits, labels, data1, data2, 
-                uncertainty_threshold=0.5, 
-                jaccard_threshold=0.6, 
-                alpha=0.5, beta=1.0):
-        
-        # 1. Base Cross Entropy Loss [cite: 165]
-        base_loss = F.cross_entropy(logits, labels)
-        
-        # 2. Compute Uncertainty (Eq 7) [cite: 199]
-        # The paper defines delta = -log(sum(exp(logits)))
-        # This is effectively negative LogSumExp.
-        log_sum_exp = torch.logsumexp(logits, dim=1)
-        uncertainty = -log_sum_exp 
-        
-        
-        if uncertainty.mean() > uncertainty_threshold:
-            j_score = self.compute_jaccard(data1, data2)
-            
-            # Determine target based on Jaccard (heuristic equivalence)
-            j_prediction = 1.0 if j_score > jaccard_threshold else 0.0
-            
-            # Model prediction (probability of class 1)
-            probs = F.softmax(logits, dim=1)
-            pred_prob = probs[:, 1]
-            
-            # Jaccard Penalty Term
-            jaccard_loss = alpha * torch.abs(pred_prob - j_prediction).mean()
-            
-            total_loss = base_loss + (beta * jaccard_loss)
-        else:
-            total_loss = base_loss
-            
-        return total_loss
+        out = torch.sigmoid(out)
+        return out.squeeze(-1)
+
+    def zxnet_loss(self, predictions, targets, batch_data):
+        return F.mse_loss(predictions, targets)

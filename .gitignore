@@ -5,6 +5,9 @@ env/
 ENV/
 .venv
 
+baechlor-thesis/
+baechlor-thesis
+
 # Python
 __pycache__/
 *.py[cod]
